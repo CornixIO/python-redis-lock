@@ -1,27 +1,31 @@
+import logging
 import sys
 import threading
-import weakref
+import time
 from base64 import b64encode
 from logging import getLogger
 from os import urandom
+from queue import SimpleQueue
 
 from redis import StrictRedis
 
-__version__ = '3.7.0'
+__version__ = '3.7.0.6'
+
+from redis_lock.decorators import handle_redis_exception
 
 loggers = {
-    k: getLogger(".".join((__name__, k)))
+    k: getLogger(".".join(("redis-lock", k)))
     for k in [
         "acquire",
-        "refresh.thread.start",
-        "refresh.thread.stop",
-        "refresh.thread.exit",
-        "refresh.start",
-        "refresh.shutdown",
-        "refresh.exit",
+        "refresh.thread",
         "release",
     ]
 }
+
+cornix_handlers = getLogger('cornix').handlers
+for logger in loggers.values():
+    logger.handlers = cornix_handlers
+    logger.setLevel(logging.INFO)
 
 PY3 = sys.version_info[0] == 3
 
@@ -55,19 +59,6 @@ EXTEND_SCRIPT = b"""
     end
 """
 
-RESET_ALL_SCRIPT = b"""
-    local locks = redis.call('keys', 'lock:*')
-    local signal
-    for _, lock in pairs(locks) do
-        signal = 'lock-signal:' .. string.sub(lock, 6)
-        redis.call('del', signal)
-        redis.call('lpush', signal, 1)
-        redis.call('expire', signal, 1)
-        redis.call('del', lock)
-    end
-    return #locks
-"""
-
 
 class AlreadyAcquired(RuntimeError):
     pass
@@ -97,18 +88,86 @@ class NotExpirable(RuntimeError):
     pass
 
 
+lock_to_extend_time = dict()
+add_lock_extend_queue = SimpleQueue()
+lock_thread = None
+scripts_registered = False
+
+
+def safe_extend_lock_time(lock):
+    try:
+        lock_to_extend_time[lock] = time.time() + lock.lock_renewal_interval
+        return True
+    except TypeError:  # this happens when the lock was removed from the dict(race condition)
+        return False
+
+
+def extend_locks(logger):
+    to_remove_locks = list()
+    for lock, extend_time in lock_to_extend_time.items():
+        if extend_time <= time.time():
+            try:
+                if lock.lock_renewal_interval:
+                    lock.extend()
+                    success = safe_extend_lock_time(lock)
+                    if not success:
+                        to_remove_locks.append(lock)
+                else:
+                    to_remove_locks.append(lock)
+            except NotAcquired as e:
+                if lock.lock_renewal_interval:
+                    logger.exception("Got NotAcquired on extend while renewal is still active %s", e)
+                to_remove_locks.append(lock)
+            except Exception as e:
+                logger.exception("Got exception on extend %s", e)
+
+    return to_remove_locks
+
+
+def handle_locks_extending():
+    logger = loggers["refresh.thread"]
+    while True:
+        try:
+            to_remove_locks = extend_locks(logger)
+
+            for lock in to_remove_locks:
+                lock_to_extend_time.pop(lock)
+
+            while not add_lock_extend_queue.empty():
+                lock = add_lock_extend_queue.get_nowait()
+                if lock:
+                    safe_extend_lock_time(lock)
+
+            time.sleep(0.5)
+        except Exception as e:
+            logger.exception("Got exception on handle_locks_extending %s", e)
+
+
+def start_locking_thread_if_needed(first_time=False):
+    global lock_thread
+    if not lock_thread or not lock_thread.is_alive():
+        if not first_time:
+            logger = loggers["refresh.thread"]
+            logger.error("Starting new thread to handle locks extending (the previous one died?)")
+        lock_thread = threading.Thread(target=handle_locks_extending)
+        lock_thread.daemon = True
+        lock_thread.start()
+
+
+start_locking_thread_if_needed(first_time=True)
+
+
 class Lock(object):
     """
-    A Lock context manager implemented via redis SETNX/BLPOP.
+    A Lock context manager implemented via redis SETNX and one extending thread.
     """
     unlock_script = None
     extend_script = None
-    reset_all_script = None
 
-    def __init__(self, redis_client, name, expire=None, id=None, auto_renewal=False, strict=True):
+    def __init__(self, redis_class, name, expire=None, id=None, auto_renewal=False, strict=True):
         """
-        :param redis_client:
-            An instance of :class:`~StrictRedis`.
+        :param redis_class:
+            A class that has conn: an instance of :class:`~StrictRedis`.
         :param name:
             The name (redis key) the lock should have.
         :param expire:
@@ -131,16 +190,14 @@ class Lock(object):
             ``self._lock_renewal_interval`` to your desired interval.
         :param strict:
             If set ``True`` then the ``redis_client`` needs to be an instance of ``redis.StrictRedis``.
-        :param signal_expire:
-            Advanced option to override signal list expiration in milliseconds. Increase it for very slow clients. Default: ``1000``.
         """
-        if strict and not isinstance(redis_client, StrictRedis):
+        if strict and not isinstance(redis_class.conn, StrictRedis):
             raise ValueError("redis_client must be instance of StrictRedis. "
                              "Use strict=False if you know what you're doing.")
         if auto_renewal and expire is None:
             raise ValueError("Expire may not be None when auto_renewal is set")
 
-        self._client = redis_client
+        self.redis_class = redis_class
 
         if expire:
             expire = int(expire)
@@ -162,42 +219,40 @@ class Lock(object):
         else:
             raise TypeError("Incorrect type for `id`. Must be bytes/str not %s." % type(id))
         self._name = name
-        self._lock_renewal_interval = (float(expire) * 2 / 3
-                                       if auto_renewal
-                                       else None)
-        self._lock_renewal_thread = None
+        self.lock_renewal_interval = self.get_renewal_interval(auto_renewal)
 
-        self.register_scripts(redis_client)
+        self.register_scripts(self.redis_class.conn)
+        self.is_locked = False
+
+        start_locking_thread_if_needed()
+
+    def get_renewal_interval(self, auto_renewal):
+        if not auto_renewal:
+            return
+        if self._expire < 10:
+            raise Exception("Expiration is too low to ensure renewal")
+        return self._expire * 0.5
 
     @classmethod
-    def register_scripts(cls, redis_client):
-        global reset_all_script
-        if reset_all_script is None:
-            reset_all_script = redis_client.register_script(RESET_ALL_SCRIPT)
+    @handle_redis_exception
+    def register_scripts(cls, redis_client):  # func is called from decorators
+        global scripts_registered
+        if not scripts_registered:
             cls.unlock_script = redis_client.register_script(UNLOCK_SCRIPT)
             cls.extend_script = redis_client.register_script(EXTEND_SCRIPT)
-            cls.reset_all_script = redis_client.register_script(RESET_ALL_SCRIPT)
-
-    @property
-    def _held(self):
-        return self.id == self.get_owner_id()
+            scripts_registered = True
 
     def reset(self):
         """
         Forcibly deletes the lock. Use this with care.
         """
-        self._client.delete(self._name)
+        self.redis_class.conn.delete(self._name)
 
     @property
     def id(self):
         return self._id
 
-    def get_owner_id(self):
-        owner_id = self._client.get(self._name)
-        if isinstance(owner_id, binary_type):
-            owner_id = owner_id.decode('ascii', 'replace')
-        return owner_id
-
+    @handle_redis_exception
     def acquire(self):
         """
         :param blocking:
@@ -207,21 +262,23 @@ class Lock(object):
         """
         logger = loggers["acquire"]
 
-        logger.debug("Getting %r ...", self._name)
+        logger.debug("Getting lock for %r ...", self._name)
 
-        if self._held:
+        if self.is_locked:
             raise AlreadyAcquired("Already acquired from this Lock instance.")
 
-        is_locked = not self._client.set(self._name, self._id, nx=True, ex=self._expire)
+        is_locked = not self.redis_class.conn.set(self._name, self._id, nx=True, ex=self._expire)
         if is_locked:
-            logger.warning("Failed to get %r.", self._name)
+            logger.debug("Failed to get lock on %r.", self._name)
             return False
 
-        logger.info("Got lock for %r.", self._name)
-        if self._lock_renewal_interval is not None:
-            self._start_lock_renewer()
+        self.is_locked = True
+        logger.debug("Got lock for %r.", self._name)
+        if self.lock_renewal_interval is not None:
+            add_lock_extend_queue.put_nowait(self)
         return True
 
+    @handle_redis_exception
     def extend(self, expire=None):
         """Extends expiration time of the lock.
 
@@ -241,7 +298,7 @@ class Lock(object):
                 "argument to extend() method or at initialization time."
             )
 
-        error = self.extend_script(client=self._client, keys=(self._name,), args=(self._id, expire))
+        error = self.extend_script(client=self.redis_class.conn, keys=(self._name,), args=(self._id, expire))
         if error == 1:
             raise NotAcquired("Lock %s is not acquired or it already expired." % self._name)
         elif error == 2:
@@ -249,68 +306,7 @@ class Lock(object):
         elif error:
             raise RuntimeError("Unsupported error code %s from EXTEND script" % error)
 
-    @staticmethod
-    def _lock_renewer(lockref, interval, stop):
-        """
-        Renew the lock key in redis every `interval` seconds for as long
-        as `self._lock_renewal_thread.should_exit` is False.
-        """
-        while not stop.wait(timeout=interval):
-            loggers["refresh.thread.start"].debug("Refreshing lock")
-            lock = lockref()
-            if lock is None:
-                loggers["refresh.thread.stop"].debug(
-                    "The lock no longer exists, stopping lock refreshing"
-                )
-                break
-            lock.extend(expire=lock._expire)
-            del lock
-        loggers["refresh.thread.exit"].debug("Exit requested, stopping lock refreshing")
-
-    def _start_lock_renewer(self):
-        """
-        Starts the lock refresher thread.
-        """
-        if self._lock_renewal_thread is not None:
-            raise AlreadyStarted("Lock refresh thread already started")
-
-        loggers["refresh.start"].debug(
-            "Starting thread to refresh lock every %s seconds",
-            self._lock_renewal_interval
-        )
-        self._lock_renewal_stop = threading.Event()
-        self._lock_renewal_thread = threading.Thread(
-            group=None,
-            target=self._lock_renewer,
-            kwargs={'lockref': weakref.ref(self),
-                    'interval': self._lock_renewal_interval,
-                    'stop': self._lock_renewal_stop}
-        )
-        self._lock_renewal_thread.setDaemon(True)
-        self._lock_renewal_thread.start()
-
-    def _stop_lock_renewer(self):
-        """
-        Stop the lock renewer.
-
-        This signals the renewal thread and waits for its exit.
-        """
-        if self._lock_renewal_thread is None or not self._lock_renewal_thread.is_alive():
-            return
-        loggers["refresh.shutdown"].debug("Signalling the lock refresher to stop")
-        self._lock_renewal_stop.set()
-        self._lock_renewal_thread.join()
-        self._lock_renewal_thread = None
-        loggers["refresh.exit"].debug("Lock refresher has stopped")
-
-    def __enter__(self):
-        acquired = self.acquire(blocking=True)
-        assert acquired, "Lock wasn't acquired, but blocking=True"
-        return self
-
-    def __exit__(self, exc_type=None, exc_value=None, traceback=None):
-        self.release()
-
+    @handle_redis_exception
     def release(self):
         """Releases the lock, that was acquired with the same object.
 
@@ -321,15 +317,20 @@ class Lock(object):
             * Use ``Lock("name", id=id_from_other_place).release()``
             * Use ``Lock("name").reset()``
         """
-        if self._lock_renewal_thread is not None:
-            self._stop_lock_renewer()
+        if not self.is_locked:
+            return
+        if self.lock_renewal_interval is not None:
+            self.lock_renewal_interval = None  # "signals the no extend required"
+
         loggers["release"].debug("Releasing %r.", self._name)
-        error = self.unlock_script(client=self._client, keys=(self._name,), args=(self._id,))
+        error = self.unlock_script(client=self.redis_class.conn, keys=(self._name,), args=(self._id,))
         if error == 1:
             raise NotAcquired("Lock %s is not acquired or it already expired." % self._name)
         elif error:
             raise RuntimeError("Unsupported error code %s from EXTEND script." % error)
+        self.is_locked = False
 
+    @handle_redis_exception
     def locked(self):
         """
         Return true if the lock is acquired.
@@ -337,19 +338,4 @@ class Lock(object):
         Checks that lock with same name already exists. This method returns true, even if
         lock have another id.
         """
-        return self._client.exists(self._name) == 1
-
-
-reset_all_script = None
-
-
-def reset_all(redis_client):
-    """
-    Forcibly deletes all locks if its remains (like a crash reason). Use this with care.
-
-    :param redis_client:
-        An instance of :class:`~StrictRedis`.
-    """
-    Lock.register_scripts(redis_client)
-
-    reset_all_script(client=redis_client)  # noqa
+        return self.redis_class.conn.exists(self._name) == 1
