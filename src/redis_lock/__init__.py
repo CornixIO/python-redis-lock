@@ -23,9 +23,9 @@ loggers = {
 }
 
 cornix_handlers = getLogger('cornix').handlers
-for logger in loggers.values():
-    logger.handlers = cornix_handlers
-    logger.setLevel(logging.INFO)
+for _logger in loggers.values():
+    _logger.handlers = cornix_handlers
+    _logger.setLevel(logging.INFO)
 
 PY3 = sys.version_info[0] == 3
 
@@ -88,15 +88,15 @@ class NotExpirable(RuntimeError):
     pass
 
 
-lock_to_extend_time = dict()
+lock_to_renewal_time = dict()
 add_lock_extend_queue = SimpleQueue()
 lock_thread = None
 scripts_registered = False
 
 
-def safe_extend_lock_time(lock):
+def safe_extend_renewal_time(lock):
     try:
-        lock_to_extend_time[lock] = time.time() + lock.lock_renewal_interval
+        lock_to_renewal_time[lock] = time.time() + lock.lock_renewal_interval
         return True
     except TypeError:  # this happens when the lock was removed from the dict(race condition)
         return False
@@ -104,12 +104,12 @@ def safe_extend_lock_time(lock):
 
 def extend_locks(logger):
     to_remove_locks = list()
-    for lock, extend_time in lock_to_extend_time.items():
+    for lock, extend_time in lock_to_renewal_time.items():
         if extend_time <= time.time():
             try:
                 if lock.lock_renewal_interval:
                     lock.extend()
-                    success = safe_extend_lock_time(lock)
+                    success = safe_extend_renewal_time(lock)
                     if not success:
                         to_remove_locks.append(lock)
                 else:
@@ -131,12 +131,12 @@ def handle_locks_extending():
             to_remove_locks = extend_locks(logger)
 
             for lock in to_remove_locks:
-                lock_to_extend_time.pop(lock)
+                lock_to_renewal_time.pop(lock)
 
             while not add_lock_extend_queue.empty():
                 lock = add_lock_extend_queue.get_nowait()
                 if lock:
-                    safe_extend_lock_time(lock)
+                    safe_extend_renewal_time(lock)
 
             time.sleep(0.5)
         except Exception as e:
