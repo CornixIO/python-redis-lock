@@ -9,7 +9,7 @@ from queue import SimpleQueue
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.6'
+__version__ = '3.7.0.7'
 
 from redis_lock.decorators import handle_redis_exception
 
@@ -146,8 +146,10 @@ def handle_locks_extending():
 def start_locking_thread_if_needed(first_time=False):
     global lock_thread
     if not lock_thread or not lock_thread.is_alive():
-        if not first_time:
-            logger = loggers["refresh.thread"]
+        logger = loggers["refresh.thread"]
+        if first_time:
+            logger.info("Starting new thread to handle locks extending")
+        else:
             logger.error("Starting new thread to handle locks extending (the previous one died?)")
         lock_thread = threading.Thread(target=handle_locks_extending)
         lock_thread.daemon = True
