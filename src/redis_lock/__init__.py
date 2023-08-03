@@ -9,7 +9,7 @@ from queue import SimpleQueue
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.7'
+__version__ = '3.7.0.8'
 
 from redis_lock.decorators import handle_redis_exception
 
@@ -90,8 +90,6 @@ class NotExpirable(RuntimeError):
 
 lock_to_renewal_time = dict()
 add_lock_extend_queue = SimpleQueue()
-lock_thread = None
-scripts_registered = False
 
 
 def safe_extend_renewal_time(lock):
@@ -143,28 +141,13 @@ def handle_locks_extending():
             logger.exception("Got exception on handle_locks_extending %s", e)
 
 
-def start_locking_thread_if_needed(first_time=False):
-    global lock_thread
-    if not lock_thread or not lock_thread.is_alive():
-        logger = loggers["refresh.thread"]
-        if first_time:
-            logger.info("Starting new thread to handle locks extending")
-        else:
-            logger.error("Starting new thread to handle locks extending (the previous one died?)")
-        lock_thread = threading.Thread(target=handle_locks_extending)
-        lock_thread.daemon = True
-        lock_thread.start()
-
-
-start_locking_thread_if_needed(first_time=True)
-
-
 class Lock(object):
     """
     A Lock context manager implemented via redis SETNX and one extending thread.
     """
     unlock_script = None
     extend_script = None
+    lock_thread = None
 
     def __init__(self, redis_class, name, expire=None, id=None, auto_renewal=False, strict=True):
         """
@@ -226,7 +209,19 @@ class Lock(object):
         self.register_scripts(self.redis_class.conn)
         self.is_locked = False
 
-        start_locking_thread_if_needed()
+        self.start_locking_thread_if_needed()
+
+    @classmethod
+    def start_locking_thread_if_needed(cls):
+        if cls.lock_thread is None or not cls.lock_thread.is_alive():
+            logger = loggers["refresh.thread"]
+            if cls.lock_thread is None:
+                logger.info("Starting new thread to handle locks extending")
+            else:
+                logger.error("Starting new thread to handle locks extending, the previous one died!")
+            cls.lock_thread = threading.Thread(target=handle_locks_extending)
+            cls.lock_thread.daemon = True
+            cls.lock_thread.start()
 
     def get_renewal_interval(self, auto_renewal):
         if not auto_renewal:
@@ -238,11 +233,10 @@ class Lock(object):
     @classmethod
     @handle_redis_exception
     def register_scripts(cls, redis_client):  # func is called from decorators
-        global scripts_registered
-        if not scripts_registered:
+        if cls.unlock_script is None:
             cls.unlock_script = redis_client.register_script(UNLOCK_SCRIPT)
+        if cls.extend_script is None:
             cls.extend_script = redis_client.register_script(EXTEND_SCRIPT)
-            scripts_registered = True
 
     def reset(self):
         """
