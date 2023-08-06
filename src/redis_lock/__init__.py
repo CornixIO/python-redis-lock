@@ -13,7 +13,7 @@ __version__ = '3.7.0.9'
 
 from redis_lock.decorators import handle_redis_exception
 
-CHECK_RENEW_LOCK_THREAD_EVERY = 100
+CHECK_RENEW_LOCK_THREAD_EVERY = 500
 
 loggers = {
     k: getLogger(".".join(("redis-lock", k)))
