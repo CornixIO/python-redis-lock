@@ -9,7 +9,7 @@ from queue import SimpleQueue
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.9'
+__version__ = '3.7.0.10'
 
 from redis_lock.decorators import handle_redis_exception
 
@@ -349,6 +349,3 @@ class Lock(object):
         lock have another id.
         """
         return self.redis_class.conn.exists(self._name) == 1
-
-
-Lock.start_renew_lock_thread()
