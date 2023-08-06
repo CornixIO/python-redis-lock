@@ -9,9 +9,11 @@ from queue import SimpleQueue
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.8'
+__version__ = '3.7.0.9'
 
 from redis_lock.decorators import handle_redis_exception
+
+CHECK_RENEW_LOCK_THREAD_EVERY = 100
 
 loggers = {
     k: getLogger(".".join(("redis-lock", k)))
@@ -90,6 +92,7 @@ class NotExpirable(RuntimeError):
 
 lock_to_renewal_time = dict()
 add_lock_extend_queue = SimpleQueue()
+create_thread_lock = threading.Lock()
 
 
 def safe_extend_renewal_time(lock):
@@ -147,7 +150,8 @@ class Lock(object):
     """
     unlock_script = None
     extend_script = None
-    lock_thread = None
+    renew_lock_thread = None
+    counter = 0
 
     def __init__(self, redis_class, name, expire=None, id=None, auto_renewal=False, strict=True):
         """
@@ -213,15 +217,25 @@ class Lock(object):
 
     @classmethod
     def start_locking_thread_if_needed(cls):
-        if cls.lock_thread is None or not cls.lock_thread.is_alive():
+        _counter = cls.counter
+        cls.counter += 1
+
+        if _counter & CHECK_RENEW_LOCK_THREAD_EVERY == 0:
+            cls.start_renew_lock_thread()
+
+    @classmethod
+    def start_renew_lock_thread(cls):
+        if cls.renew_lock_thread is None or not cls.renew_lock_thread.is_alive():
             logger = loggers["refresh.thread"]
-            if cls.lock_thread is None:
-                logger.info("Starting new thread to handle locks extending")
-            else:
-                logger.error("Starting new thread to handle locks extending, the previous one died!")
-            cls.lock_thread = threading.Thread(target=handle_locks_extending)
-            cls.lock_thread.daemon = True
-            cls.lock_thread.start()
+            with create_thread_lock:
+                if cls.renew_lock_thread is None or not cls.renew_lock_thread.is_alive():
+                    if cls.renew_lock_thread is None:
+                        logger.info("Starting new thread to handle locks extending")
+                    else:
+                        logger.error("Starting new thread to handle locks extending, the previous one died!")
+                    cls.renew_lock_thread = threading.Thread(target=handle_locks_extending)
+                    cls.renew_lock_thread.daemon = True
+                    cls.renew_lock_thread.start()
 
     def get_renewal_interval(self, auto_renewal):
         if not auto_renewal:
@@ -335,3 +349,6 @@ class Lock(object):
         lock have another id.
         """
         return self.redis_class.conn.exists(self._name) == 1
+
+
+Lock.start_renew_lock_thread()
