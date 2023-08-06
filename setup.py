@@ -25,7 +25,7 @@ def read(*names, **kwargs):
 
 setup(
     name='python-redis-lock',
-    version='3.7.0.10',
+    version='3.7.0.11',
     license='BSD-2-Clause',
     description='Lock context manager implemented via redis SETNX/BLPOP.',
     long_description='%s\n%s' % (
