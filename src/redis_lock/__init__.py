@@ -5,11 +5,11 @@ import time
 from base64 import b64encode
 from logging import getLogger
 from os import urandom
-from queue import SimpleQueue
+from collections import deque
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.11'
+__version__ = '3.7.0.12'
 
 from redis_lock.decorators import handle_redis_exception
 
@@ -91,7 +91,7 @@ class NotExpirable(RuntimeError):
 
 
 lock_to_renewal_time = dict()
-add_lock_extend_queue = SimpleQueue()
+add_lock_extend_queue = deque()
 create_thread_lock = threading.Lock()
 
 
@@ -134,10 +134,12 @@ def handle_locks_extending():
             for lock in to_remove_locks:
                 lock_to_renewal_time.pop(lock)
 
-            while not add_lock_extend_queue.empty():
-                lock = add_lock_extend_queue.get_nowait()
-                if lock:
+            try:
+                while True:
+                    lock = add_lock_extend_queue.pop()
                     safe_extend_renewal_time(lock)
+            except IndexError:
+                pass
 
             time.sleep(0.5)
         except Exception as e:
@@ -285,7 +287,7 @@ class Lock(object):
         self.is_locked = True
         logger.debug("Got lock for %r.", self._name)
         if self.lock_renewal_interval is not None:
-            add_lock_extend_queue.put_nowait(self)
+            add_lock_extend_queue.appendleft(self)
         return True
 
     @handle_redis_exception
