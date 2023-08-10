@@ -179,10 +179,6 @@ class Lock(object):
             cls.extend_script = redis_client.register_script(EXTEND_SCRIPT)
             cls.reset_all_script = redis_client.register_script(RESET_ALL_SCRIPT)
 
-    @property
-    def _held(self):
-        return self.id == self.get_owner_id()
-
     def reset(self):
         """
         Forcibly deletes the lock. Use this with care.
@@ -210,7 +206,7 @@ class Lock(object):
 
         logger.debug("Getting %r ...", self._name)
 
-        if self._held:
+        if self.is_locked:
             raise AlreadyAcquired("Already acquired from this Lock instance.")
 
         is_locked = not self._client.set(self._name, self._id, nx=True, ex=self._expire)
