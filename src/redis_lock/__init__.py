@@ -5,11 +5,11 @@ import time
 from base64 import b64encode
 from logging import getLogger
 from os import urandom
-from queue import SimpleQueue
+from queue import SimpleQueue, Empty
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.11'
+__version__ = '3.7.0.13'
 
 from redis_lock.decorators import handle_redis_exception
 
@@ -93,20 +93,21 @@ class NotExpirable(RuntimeError):
 lock_to_renewal_time = dict()
 add_lock_extend_queue = SimpleQueue()
 create_thread_lock = threading.Lock()
-
+was_scripts_registered = False
 
 def safe_extend_renewal_time(lock):
     try:
         lock_to_renewal_time[lock] = time.time() + lock.lock_renewal_interval
         return True
-    except TypeError:  # this happens when the lock was removed from the dict(race condition)
+    except TypeError:  # this happens when the lock lock_renewal_interval became None
         return False
 
 
 def extend_locks(logger):
-    to_remove_locks = list()
+    to_remove_locks = []
+    now = time.time()  # outside for - less accurate - better performance.
     for lock, extend_time in lock_to_renewal_time.items():
-        if extend_time <= time.time():
+        if extend_time <= now:
             try:
                 if lock.lock_renewal_interval:
                     lock.extend()
@@ -132,14 +133,17 @@ def handle_locks_extending():
             to_remove_locks = extend_locks(logger)
 
             for lock in to_remove_locks:
-                lock_to_renewal_time.pop(lock)
+                del lock_to_renewal_time[lock]
 
-            while not add_lock_extend_queue.empty():
-                lock = add_lock_extend_queue.get_nowait()
-                if lock:
-                    safe_extend_renewal_time(lock)
+            try:
+                while True:
+                    lock = add_lock_extend_queue.get_nowait()
+                    if lock.lock_renewal_interval:
+                        safe_extend_renewal_time(lock)
+            except Empty:
+                pass
 
-            time.sleep(0.5)
+            time.sleep(1)
         except Exception as e:
             logger.exception("Got exception on handle_locks_extending %s", e)
 
@@ -197,7 +201,7 @@ class Lock(object):
         self._expire = expire
 
         if id is None:
-            self._id = b64encode(urandom(18)).decode('ascii')
+            self._id = b64encode(urandom(18)).decode('ascii')  # TODO: improve
         elif isinstance(id, binary_type):
             try:
                 self._id = id.decode('ascii')
@@ -247,10 +251,11 @@ class Lock(object):
     @classmethod
     @handle_redis_exception
     def register_scripts(cls, redis_client):  # func is called from decorators
-        if cls.unlock_script is None:
+        global was_scripts_registered
+        if was_scripts_registered is None:
             cls.unlock_script = redis_client.register_script(UNLOCK_SCRIPT)
-        if cls.extend_script is None:
             cls.extend_script = redis_client.register_script(EXTEND_SCRIPT)
+            was_scripts_registered = True
 
     def reset(self):
         """
