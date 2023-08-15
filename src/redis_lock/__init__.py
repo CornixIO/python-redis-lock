@@ -13,7 +13,7 @@ __version__ = '3.7.0.17'
 
 # from redis_lock.decorators import handle_redis_exception
 
-CHECK_RENEW_LOCK_THREAD_EVERY = 500
+CHECK_RENEW_LOCK_THREAD_EVERY = 1000
 
 loggers = {
     k: getLogger(".".join(("redis-lock", k)))
@@ -95,6 +95,7 @@ lock_to_renewal_time = dict()
 add_lock_extend_queue = SimpleQueue()
 create_thread_lock = threading.Lock()
 was_scripts_registered = False
+
 
 def safe_extend_renewal_time(lock):
     try:
@@ -222,7 +223,7 @@ class Lock(object):
         self.register_scripts(self.redis_class.conn)
         self.is_locked = False
 
-        # self.start_locking_thread_if_needed()
+        self.start_locking_thread_if_needed()
 
     @classmethod
     def start_locking_thread_if_needed(cls):
