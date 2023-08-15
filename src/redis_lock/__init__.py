@@ -296,8 +296,7 @@ class Lock(object):
         self.is_locked = True
         logger.debug("Got lock for %r.", self._name)
         if self.lock_renewal_interval is not None:
-            # add_lock_extend_queue.put_nowait(self)
-            pass
+            add_lock_extend_queue.put_nowait(self)
         return True
 
     # @handle_redis_exception
