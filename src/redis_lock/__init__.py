@@ -9,7 +9,7 @@ from queue import SimpleQueue, Empty
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.16'
+__version__ = '3.7.0.17'
 
 from redis_lock.decorators import handle_redis_exception
 
@@ -108,6 +108,9 @@ def extend_locks(logger):
     to_remove_locks = []
     now = time.time()  # outside for - less accurate - better performance.
     for lock, extend_time in lock_to_renewal_time.items():
+        if not lock.lock_renewal_interval:
+            to_remove_locks.append(lock)
+            continue
         if extend_time <= now:
             try:
                 if lock.lock_renewal_interval:
