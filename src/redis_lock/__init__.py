@@ -9,7 +9,7 @@ from queue import SimpleQueue, Empty
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.14'
+__version__ = '3.7.0.16'
 
 from redis_lock.decorators import handle_redis_exception
 
@@ -21,6 +21,7 @@ loggers = {
         "acquire",
         "refresh.thread",
         "release",
+        "extend"
     ]
 }
 
@@ -314,6 +315,8 @@ class Lock(object):
             )
 
         error = self.extend_script(client=self.redis_class.conn, keys=(self._name,), args=(self._id, expire))
+        logger = loggers["extend"]
+        logger.info("Extending lock for %s", self._name)
         if error == 1:
             raise NotAcquired("Lock %s is not acquired or it already expired." % self._name)
         elif error == 2:
