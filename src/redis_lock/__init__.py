@@ -140,7 +140,8 @@ def handle_locks_extending():
                 del lock_to_renewal_time[lock]
 
             try:
-                while True:
+                size = add_lock_extend_queue.qsize()
+                for _ in range(size):
                     lock = add_lock_extend_queue.get_nowait()
                     if lock.lock_renewal_interval:
                         safe_extend_renewal_time(lock)
@@ -221,7 +222,7 @@ class Lock(object):
         self.register_scripts(self.redis_class.conn)
         self.is_locked = False
 
-        self.start_locking_thread_if_needed()
+        # self.start_locking_thread_if_needed()
 
     @classmethod
     def start_locking_thread_if_needed(cls):
@@ -294,7 +295,8 @@ class Lock(object):
         self.is_locked = True
         logger.debug("Got lock for %r.", self._name)
         if self.lock_renewal_interval is not None:
-            add_lock_extend_queue.put_nowait(self)
+            # add_lock_extend_queue.put_nowait(self)
+            pass
         return True
 
     @handle_redis_exception
