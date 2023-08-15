@@ -358,3 +358,34 @@ def reset_all(redis_client):
     Lock.register_scripts(redis_client)
 
     reset_all_script(client=redis_client)  # noqa
+
+
+def multi_lock(redis_client, lock_name_list: list[str], ttl: int) -> list[Lock]:
+    lock_obj_list: list[Lock] = []
+    for lock_name in lock_name_list:
+        lock_obj = Lock(redis_client, name=lock_name, expire=ttl, auto_renewal=False, strict=False)
+        lock_obj_list.append(lock_obj)
+    with redis_client.pipeline() as pipe:
+        for lock_obj in lock_obj_list:
+            pipe.set(lock_obj._name, lock_obj._id, nx=True, ex=lock_obj._expire)
+        results = pipe.execute()
+    for i, result in enumerate(results):
+        if result:
+            lock_obj_list[i].is_locked = True
+    return lock_obj_list
+
+
+def multi_unlock(redis_client, lock_objs: list[Lock]) -> bool:
+    with redis_client.pipeline() as pipe:
+        for lock_obj in lock_objs:
+            pipe.get(lock_obj._name)
+        results = pipe.execute()
+    for i, result in enumerate(results):
+        if result != lock_objs[i]._id:
+            return False
+    else:
+        with redis_client.pipeline() as pipe:
+            for lock_obj in lock_objs:
+                pipe.delete(lock_obj._name)
+            pipe.execute()
+        return True
