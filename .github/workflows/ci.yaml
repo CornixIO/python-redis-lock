@@ -24,4 +24,4 @@ jobs:
         TAG_NAME=`python setup.py --version`
 
         git tag --force $TAG_NAME
-        git push origin $TAG_NAME
+        git push --force origin $TAG_NAME
