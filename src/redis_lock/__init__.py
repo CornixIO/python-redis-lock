@@ -9,7 +9,7 @@ from queue import SimpleQueue, Empty
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.14'
+__version__ = '3.7.0.15'
 
 from redis_lock.decorators import handle_redis_exception
 
@@ -224,7 +224,7 @@ class Lock(object):
         _counter = cls.counter
         cls.counter += 1
 
-        if _counter % CHECK_RENEW_LOCK_THREAD_EVERY == 0:
+        if _counter == 0:
             cls.start_renew_lock_thread()
 
     @classmethod
