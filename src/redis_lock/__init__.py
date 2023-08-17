@@ -11,7 +11,6 @@ from redis import StrictRedis
 
 __version__ = '3.7.0.17'
 
-# from redis_lock.decorators import handle_redis_exception
 
 CHECK_RENEW_LOCK_THREAD_EVERY = 1000
 
@@ -255,7 +254,6 @@ class Lock(object):
         return self._expire * 0.5
 
     @classmethod
-    # @handle_redis_exception
     def register_scripts(cls, redis_client):  # func is called from decorators
         global was_scripts_registered
         if not was_scripts_registered:
@@ -273,7 +271,6 @@ class Lock(object):
     def id(self):
         return self._id
 
-    # @handle_redis_exception
     def acquire(self):
         """
         :param blocking:
@@ -299,7 +296,6 @@ class Lock(object):
             add_lock_extend_queue.put_nowait(self)
         return True
 
-    # @handle_redis_exception
     def extend(self, expire=None):
         """Extends expiration time of the lock.
 
@@ -329,7 +325,6 @@ class Lock(object):
         elif error:
             raise RuntimeError("Unsupported error code %s from EXTEND script" % error)
 
-    # @handle_redis_exception
     def release(self):
         """Releases the lock, that was acquired with the same object.
 
@@ -353,7 +348,6 @@ class Lock(object):
             raise RuntimeError("Unsupported error code %s from EXTEND script." % error)
         self.is_locked = False
 
-    # @handle_redis_exception
     def locked(self):
         """
         Return true if the lock is acquired.
