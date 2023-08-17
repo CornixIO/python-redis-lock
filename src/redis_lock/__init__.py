@@ -210,7 +210,7 @@ class Lock(object):
 
         logger.debug("Getting %r ...", self._name)
 
-        if self._held:
+        if self.is_locked:
             raise AlreadyAcquired("Already acquired from this Lock instance.")
 
         is_locked = not self._client.set(self._name, self._id, nx=True, ex=self._expire)
