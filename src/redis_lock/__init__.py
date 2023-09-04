@@ -9,7 +9,7 @@ from queue import SimpleQueue, Empty
 
 from redis import StrictRedis
 
-__version__ = '3.7.1'
+__version__ = '3.7.0.1'
 
 loggers = {
     k: getLogger(".".join(("redis-lock", k)))
