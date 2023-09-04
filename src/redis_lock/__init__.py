@@ -355,21 +355,6 @@ class Lock(object):
         return self.redis_class.conn.exists(self._name) == 1
 
 
-reset_all_script = None
-
-
-def reset_all(redis_client):
-    """
-    Forcibly deletes all locks if its remains (like a crash reason). Use this with care.
-
-    :param redis_client:
-        An instance of :class:`~StrictRedis`.
-    """
-    Lock.register_scripts(redis_client)
-
-    reset_all_script(client=redis_client)  # noqa
-
-
 def multi_lock(redis_client, lock_name_list: list[str], ttl: int) -> list[Lock]:
     lock_obj_list: list[Lock] = []
     for lock_name in lock_name_list:
