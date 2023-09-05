@@ -360,11 +360,11 @@ class Lock(object):
         return self.redis_class.conn.exists(self._name) == 1
 
 
-def multi_lock(redis_client, lock_name_list: list[str], ttl: int) -> list[Lock]:
+def multi_lock(redis_client, lock_name_list: list[str], ttl: int, auto_renewal=False) -> list[Lock]:
     lock_start_time = time.time()
     lock_obj_list: list[Lock] = []
     for lock_name in lock_name_list:
-        lock_obj = Lock(redis_client, name=lock_name, expire=ttl, auto_renewal=False, strict=False)
+        lock_obj = Lock(redis_client, name=lock_name, expire=ttl, auto_renewal=auto_renewal, strict=False)
         lock_obj_list.append(lock_obj)
     with redis_client.pipeline() as pipe:
         for lock_obj in lock_obj_list:
@@ -374,6 +374,8 @@ def multi_lock(redis_client, lock_name_list: list[str], ttl: int) -> list[Lock]:
         if result:
             lock_obj_list[i].is_locked = True
             lock_obj_list[i].lock_start_time = lock_start_time
+            if lock_obj_list[i].lock_renewal_interval is not None:
+                add_lock_extend_queue.put_nowait(lock_obj_list[i])
     return lock_obj_list
 
 
@@ -391,6 +393,8 @@ def multi_unlock(redis_client, lock_objs: list[Lock]):
         else:
             with redis_client.pipeline() as pipe:
                 for lock_obj in lock_objs:
+                    if lock_obj.lock_renewal_interval is not None:
+                        lock_obj.lock_renewal_interval = None
                     pipe.delete(lock_obj._name)
                 pipe.execute()
                 return
