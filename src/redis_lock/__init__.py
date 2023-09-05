@@ -11,6 +11,8 @@ from redis import StrictRedis
 
 __version__ = '3.7.0.1'
 
+CHECK_RENEW_LOCK_THREAD_EVERY = 1000
+
 loggers = {
     k: getLogger(".".join(("redis-lock", k)))
     for k in [
