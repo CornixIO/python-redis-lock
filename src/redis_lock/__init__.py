@@ -393,4 +393,7 @@ def multi_unlock(redis_client, lock_objs: list[Lock]):
                 pipe.execute()
                 return
     for lock_obj in lock_objs:
-        lock_obj.release()
+        try:
+            lock_obj.release()
+        except NotAcquired:
+            pass
