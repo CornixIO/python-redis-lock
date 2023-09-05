@@ -360,13 +360,13 @@ class Lock(object):
         return self.redis_class.conn.exists(self._name) == 1
 
 
-def multi_lock(redis_client, lock_name_list: list[str], ttl: int, auto_renewal=False) -> list[Lock]:
+def multi_lock(redis_class, lock_name_list: list[str], ttl: int, auto_renewal=False) -> list[Lock]:
     lock_start_time = time.time()
     lock_obj_list: list[Lock] = []
     for lock_name in lock_name_list:
-        lock_obj = Lock(redis_client, name=lock_name, expire=ttl, auto_renewal=auto_renewal, strict=False)
+        lock_obj = Lock(redis_class, name=lock_name, expire=ttl, auto_renewal=auto_renewal, strict=False)
         lock_obj_list.append(lock_obj)
-    with redis_client.pipeline() as pipe:
+    with redis_class.conn.pipeline() as pipe:
         for lock_obj in lock_obj_list:
             pipe.set(lock_obj._name, lock_obj._id, nx=True, ex=lock_obj._expire)
         results = pipe.execute()
