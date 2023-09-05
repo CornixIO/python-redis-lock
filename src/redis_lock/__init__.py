@@ -370,16 +370,21 @@ def multi_lock(redis_client, lock_name_list: list[str], ttl: int) -> list[Lock]:
     return lock_obj_list
 
 
-def multi_unlock(redis_client, lock_objs: list[Lock]):
-    with redis_client.pipeline() as pipe:
-        for lock_obj in lock_objs:
-            pipe.get(lock_obj._name)
-        results = pipe.execute()
-    for i, result in enumerate(results):
-        if result != lock_objs[i]._id:
-            raise NotAcquired()
-    else:
+def multi_unlock(redis_client, lock_objs: list[Lock], lock_start_time: float):
+    ttl = lock_objs[0]._expire or 0
+    if (time.time() - lock_start_time) < (ttl // 2):
         with redis_client.pipeline() as pipe:
             for lock_obj in lock_objs:
-                pipe.delete(lock_obj._name)
-            pipe.execute()
+                pipe.get(lock_obj._name)
+            results = pipe.execute()
+        for i, result in enumerate(results):
+            if result != lock_objs[i]._id:
+                break
+        else:
+            with redis_client.pipeline() as pipe:
+                for lock_obj in lock_objs:
+                    pipe.delete(lock_obj._name)
+                pipe.execute()
+                return
+    for lock_obj in lock_objs:
+        lock_obj.release()
