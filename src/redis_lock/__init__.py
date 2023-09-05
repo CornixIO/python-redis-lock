@@ -221,6 +221,8 @@ class Lock(object):
 
         self.start_locking_thread_if_needed()
 
+        self.lock_start_time = None
+
     @classmethod
     def start_locking_thread_if_needed(cls):
         _counter = cls.counter
@@ -291,6 +293,7 @@ class Lock(object):
         logger.debug("Got lock for %r.", self._name)
         if self.lock_renewal_interval is not None:
             add_lock_extend_queue.put_nowait(self)
+        self.lock_start_time = time.time()
         return True
 
     def extend(self, expire=None):
@@ -356,6 +359,7 @@ class Lock(object):
 
 
 def multi_lock(redis_client, lock_name_list: list[str], ttl: int) -> list[Lock]:
+    lock_start_time = time.time()
     lock_obj_list: list[Lock] = []
     for lock_name in lock_name_list:
         lock_obj = Lock(redis_client, name=lock_name, expire=ttl, auto_renewal=False, strict=False)
@@ -367,11 +371,13 @@ def multi_lock(redis_client, lock_name_list: list[str], ttl: int) -> list[Lock]:
     for i, result in enumerate(results):
         if result:
             lock_obj_list[i].is_locked = True
+            lock_obj_list[i].lock_start_time = lock_start_time
     return lock_obj_list
 
 
-def multi_unlock(redis_client, lock_objs: list[Lock], lock_start_time: float):
+def multi_unlock(redis_client, lock_objs: list[Lock]):
     ttl = lock_objs[0]._expire or 0
+    lock_start_time = lock_objs[0].lock_start_time
     if (time.time() - lock_start_time) < (ttl // 2):
         with redis_client.pipeline() as pipe:
             for lock_obj in lock_objs:
