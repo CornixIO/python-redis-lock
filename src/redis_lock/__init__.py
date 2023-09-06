@@ -395,5 +395,5 @@ def multi_unlock(redis_client, lock_objs: list[Lock], lock_start_time: float):
     for lock_obj in lock_objs:
         try:
             lock_obj.release()
-        except NotAcquired:
-            pass
+        except NotAcquired as e:
+            loggers["release"].error("Failed to unlock lock_obj: %s\n%s", lock_obj._name, e)
