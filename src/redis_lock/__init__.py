@@ -9,8 +9,7 @@ from queue import SimpleQueue, Empty
 
 from redis import StrictRedis
 
-__version__ = '3.7.0.17'
-
+__version__ = '3.7.0.1'
 
 CHECK_RENEW_LOCK_THREAD_EVERY = 1000
 
@@ -356,3 +355,45 @@ class Lock(object):
         lock have another id.
         """
         return self.redis_class.conn.exists(self._name) == 1
+
+
+def multi_lock(redis_class, lock_name_list: list[str], ttl: int, auto_renewal=False) -> list[Lock]:
+    lock_obj_list: list[Lock] = []
+    for lock_name in lock_name_list:
+        lock_obj = Lock(redis_class, name=lock_name, expire=ttl, auto_renewal=auto_renewal, strict=False)
+        lock_obj_list.append(lock_obj)
+    with redis_class.conn.pipeline() as pipe:
+        for lock_obj in lock_obj_list:
+            pipe.set(lock_obj._name, lock_obj._id, nx=True, ex=lock_obj._expire)
+        results = pipe.execute()
+    for i, result in enumerate(results):
+        if result:
+            lock_obj_list[i].is_locked = True
+            if lock_obj_list[i].lock_renewal_interval is not None:
+                add_lock_extend_queue.put_nowait(lock_obj_list[i])
+    return lock_obj_list
+
+
+def multi_unlock(redis_client, lock_objs: list[Lock], lock_start_time: float):
+    ttl = lock_objs[0]._expire or 0
+    if (time.time() - lock_start_time) < (ttl // 2):
+        with redis_client.pipeline() as pipe:
+            for lock_obj in lock_objs:
+                pipe.get(lock_obj._name)
+            results = pipe.execute()
+        for i, result in enumerate(results):
+            if result != lock_objs[i]._id:
+                break
+        else:
+            with redis_client.pipeline() as pipe:
+                for lock_obj in lock_objs:
+                    if lock_obj.lock_renewal_interval is not None:
+                        lock_obj.lock_renewal_interval = None
+                    pipe.delete(lock_obj._name)
+                pipe.execute()
+                return
+    for lock_obj in lock_objs:
+        try:
+            lock_obj.release()
+        except NotAcquired as e:
+            loggers["release"].error("Failed to unlock lock_obj: %s\n%s", lock_obj._name, e)
